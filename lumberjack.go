@@ -22,6 +22,7 @@
 package lumberjack
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -92,17 +93,20 @@ type Logger struct {
 	// time.
 	LocalTime bool `json:"localtime" yaml:"localtime"`
 
-	size int64
-	file *os.File
-	mu   sync.Mutex
+	BufferSize int `json:"buffersize" yaml:"buffersize"`
+
+	size   int64
+	file   *os.File
+	writer *bufio.Writer
+	mu     sync.Mutex
 }
 
 var (
 	// currentTime exists so it can be mocked out by tests.
 	currentTime = time.Now
 
-	// os_Stat exists so it can be mocked out by tests.
-	os_Stat = os.Stat
+	// osStat exists so it can be mocked out by tests.
+	osStat = os.Stat
 
 	// megabyte is the conversion factor between MaxSize and bytes.  It is a
 	// variable so tests can mock it out and not need to write megabytes of data
@@ -137,8 +141,12 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 		}
 	}
 
-	n, err = l.file.Write(p)
+	n, err = l.writer.Write(p)
 	l.size += int64(n)
+
+	if err != nil {
+		l.openNew()
+	}
 
 	return n, err
 }
@@ -157,6 +165,10 @@ func (l *Logger) close() error {
 	}
 	err := l.file.Close()
 	l.file = nil
+	if l.writer != nil {
+		l.writer.Flush()
+	}
+	l.writer = nil
 	return err
 }
 
@@ -195,7 +207,7 @@ func (l *Logger) openNew() error {
 
 	name := l.filename()
 	mode := os.FileMode(0644)
-	info, err := os_Stat(name)
+	info, err := osStat(name)
 	if err == nil {
 		// Copy the mode off the old logfile.
 		mode = info.Mode()
@@ -220,6 +232,10 @@ func (l *Logger) openNew() error {
 	}
 	l.file = f
 	l.size = 0
+	if l.writer != nil {
+		l.writer.Flush()
+	}
+	l.writer = bufio.NewWriterSize(l.file, l.BufferSize)
 	return nil
 }
 
@@ -245,7 +261,7 @@ func backupName(name string, local bool) string {
 // put it over the MaxSize, a new file is created.
 func (l *Logger) openExistingOrNew(writeLen int) error {
 	filename := l.filename()
-	info, err := os_Stat(filename)
+	info, err := osStat(filename)
 	if os.IsNotExist(err) {
 		return l.openNew()
 	}
@@ -259,6 +275,10 @@ func (l *Logger) openExistingOrNew(writeLen int) error {
 		if err == nil {
 			l.file = file
 			l.size = info.Size()
+			if l.writer != nil {
+				l.writer.Flush()
+			}
+			l.writer = bufio.NewWriterSize(l.file, l.BufferSize)
 			return nil
 		}
 		// if we fail to open the old log file for some reason, just ignore
